@@ -29,7 +29,7 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
 | all other chunks of 5–9: tests, tables, figures, September forecasts, export, session information | run, on the cached forecasts | run, on the new forecasts |
 
 - The default mode tunes nothing and makes no rolling forecast. Every one-day point forecast except Naive (yesterday's price) comes from the cache, SeasonalNaive included; `insample-residuals` only fits the four traditional models once on the training period for the residual diagnostics.
-- The month-ahead section (6.2) is computed in both modes. Its forecasts take only the frozen SARIMA and ETS specifications from the cache: the two models are re-estimated on the full sample for the September path and at every start day of the 30-day backtest, which takes one to two minutes.
+- The month-ahead section (6.2) is computed in both modes. Its forecasts take only the frozen SARIMA and ETS specifications from the cache: SARIMA is re-estimated on the full sample for the September path, and both models at every start day of the 30-day backtest, which takes one to two minutes.
 - `run_models: true` overwrites three files: `output/model_runs.rds`, `output/model_forecasts.xlsx` and `output/ancillary_robustness.rds`. Their previous contents are lost, so keep a copy before a full run.
 - Status of the cached forecasts: the cached XGBoost forecasts have been re-run with this code and reproduce exactly. The cached LSTM forecasts come from an earlier run with the same model code; they have not been re-run in the present environment, and because the TensorFlow version and the hardware differ, a re-run may give slightly different numbers.
 
@@ -1150,7 +1150,7 @@ kable(concentration, digits = 2, caption = "Concentration of the test-best model
 
 # Forecasts beyond the sample: September 2026
 
-Two layers of forecast for the month after the data end, both made with the frozen settings and data up to 31 August 2026: a one-day forecast for 1 September from every model, and a 30-day path for the whole month from SARIMA and ETS. No September value is read, so neither layer is scored.
+Two layers of forecast for the month after the data end, both made with the frozen settings and data up to 31 August 2026: a one-day forecast for 1 September from every model, and a 30-day path for the whole month from SARIMA. No September value is read, so neither layer is scored.
 
 ## Next-day forecast: 1 September 2026
 
@@ -1186,21 +1186,20 @@ kable(next_day, digits = 2, row.names = FALSE,
 
 ## Month-ahead forecast: September 2026
 
-A 30-day path for 1–30 September from the two price-history models, SARIMA and ETS. Their frozen specifications (`selected$SARIMA$config`, `selected$ETS$config`) are neither re-selected nor re-tuned. Only the parameters are re-estimated, on all daily prices from 1 January 2021 to 31 August 2026, with the same calls as a weekly re-estimation in `rolling_predict()`. Both paths are reported; neither is chosen over the other. This section runs in both modes and needs neither `xgboost` nor `keras3`.
+A 30-day path for 1–30 September and a forecast of the September average price, from SARIMA, the main model of this section. The frozen SARIMA specification (`selected$SARIMA$config`) is neither re-selected nor re-tuned. Only its parameters are re-estimated, on all daily prices from 1 January 2021 to 31 August 2026, with the same call as a weekly re-estimation in `rolling_predict()`. The intervals are empirical and come from the errors of a 30-day backtest. ETS, the other price-history model, appears in that backtest only. This section runs in both modes and needs neither `xgboost` nor `keras3`.
 
-**Why 30 days.** The course brief asks for a "forecast for the next year or relevant horizon". Electricity retailers and large consumers arrange purchases and hedges month by month, so one month is the relevant horizon. And the backtest below shows that errors and interval widths grow with the horizon, so a longer path would carry little information.
+**Why 30 days.** The course brief asks for a "forecast for the next year or relevant horizon". Electricity retailers and large consumers arrange purchases and hedges month by month, so one month is the relevant horizon. And the backtest below shows that errors and intervals grow with the horizon, so a longer path would carry little information.
 
 **Why XGBoost has no path.** XGBoost, the recommended one-day model, is shown for 1 September only and is not iterated forward. Its inputs are the previous day's demand forecast, reserve and regulation prices, fuel price and temperature, so a forecast for 2 September onwards would first need assumed or forecast values of those variables.
 
-**Intervals.** The one-day intervals above are empirical error quantiles. The path uses each model's own 80 % and 95 % intervals instead, because the backtest gives too few errors per step to estimate a 95 % quantile; the backtest then checks how these model intervals cover.
-
 ```{r month-ahead}
 horizon <- 30L
-path_models <- c("SARIMA", "ETS")
+bands <- list("Days 1-7" = 1:7, "Days 8-14" = 8:14, "Days 15-30" = 15:30)
+band_of <- function(step) names(bands)[findInterval(step, vapply(bands, min, numeric(1)))]
 
-# 30-day forecast of `kind` from the price series y, with 80% and 95% intervals. Naive and SeasonalNaive are the
-# benchmarks; SARIMA and ETS keep their frozen specification and re-estimate its parameters on y, with the same
-# calls as the weekly re-estimation in rolling_predict()
+# 30-day forecast of `kind` from the price series y, with the model's own 80% and 95% intervals. Naive and
+# SeasonalNaive are the benchmarks; SARIMA and ETS keep their frozen specification and re-estimate its parameters
+# on y, with the same calls as the weekly re-estimation in rolling_predict()
 forecast_30 <- function(kind, y) {
   series <- ts(y, frequency = 7)
   if (kind == "Naive") return(naive(series, h = horizon, level = c(80, 95)))
@@ -1212,7 +1211,7 @@ forecast_30 <- function(kind, y) {
   forecast(model, h = horizon, level = c(80, 95))
 }
 
-# One row per forecast day: point forecast and interval bounds
+# One row per forecast day: point forecast and the bounds of the model's own intervals
 path_table <- function(fc, kind, dates) {
   data.frame(Date = dates, Step = seq_along(dates), Model = kind, Prediction = as.numeric(fc$mean),
              Lower80 = as.numeric(fc$lower[, "80%"]), Upper80 = as.numeric(fc$upper[, "80%"]),
@@ -1224,58 +1223,18 @@ price_history <- daily[daily$Date <= end_date, c("Date", "DailyUSEP")]
 stopifnot(min(price_history$Date) == start_date, max(price_history$Date) == end_date, !anyNA(price_history$DailyUSEP))
 september_dates <- end_date + seq_len(horizon)  # 2026-09-01 to 2026-09-30
 
-september_fc <- lapply(setNames(path_models, path_models), forecast_30, y = price_history$DailyUSEP)
-september_fc$SARIMA$model  # frozen specifications with the re-estimated parameters
-september_fc$ETS$model
-
-september_long <- bind_rows(lapply(path_models, function(kind) path_table(september_fc[[kind]], kind, september_dates)))
-september_path <- data.frame(Date = september_dates, Step = seq_len(horizon))
-for (kind in path_models) {
-  path <- september_long[september_long$Model == kind, ]
-  september_path[[kind]] <- path$Prediction
-  for (bound in c("Lower80", "Upper80", "Lower95", "Upper95")) september_path[[paste(kind, bound, sep = "_")]] <- path[[bound]]
-}
-kable(september_path, digits = 1,
-      caption = "September 2026: 30-day paths of the frozen SARIMA and ETS models with their 80% and 95% intervals (SGD/MWh)")
-
-# Averaging the daily bounds over the month does not give an interval for the monthly mean
-september_summary <- september_long |>
-  mutate(Model = factor(Model, levels = path_models)) |>
-  group_by(Model) |>
-  summarise(Day1 = Prediction[Step == 1L], Day30 = Prediction[Step == horizon], MonthMean = mean(Prediction),
-            MeanLower80 = mean(Lower80), MeanUpper80 = mean(Upper80), MeanLower95 = mean(Lower95), MeanUpper95 = mean(Upper95))
-kable(september_summary, digits = 1,
-      caption = "September 2026 paths: first day, last day, mean of the 30 daily point forecasts, and the daily interval bounds averaged over the month (SGD/MWh)")
-```
-
-```{r fig6, fig.height = 5.5}
-last_month <- daily[daily$Date >= as.Date(format(end_date, "%Y-%m-01")) & daily$Date <= end_date, c("Date", "DailyUSEP")]
-xgb_next <- next_prediction[next_prediction$Model == "XGBoost", c("Date", "Prediction")]
-p6 <- september_long |>
-  mutate(Model = factor(Model, levels = path_models)) |>
-  ggplot(aes(x = Date)) +
-  geom_ribbon(aes(ymin = Lower95, ymax = Upper95, fill = "95%")) +
-  geom_ribbon(aes(ymin = Lower80, ymax = Upper80, fill = "80%")) +
-  geom_line(data = last_month, aes(y = DailyUSEP, colour = "Actual")) +
-  geom_line(aes(y = Prediction, colour = "Forecast")) +
-  geom_point(data = xgb_next, aes(y = Prediction, shape = "XGBoost, 1 Sep only"), colour = "white",
-             fill = model_colours[["XGBoost"]], size = 2.5, stroke = 0.8) +
-  facet_grid(vars(Model), scales = "free_y") +
-  scale_fill_manual(values = c("80%" = "#596DD5", "95%" = "#D5DBFF")) +
-  scale_colour_manual(values = c(Actual = "black", Forecast = "#0000AA")) +
-  scale_shape_manual(values = c("XGBoost, 1 Sep only" = 21)) +
-  labs(title = "September 2026: 30-day paths of the frozen SARIMA and ETS models",
-       subtitle = "Model-based intervals; August 2026 actual prices; no September actual is used. Vertical scales differ.",
-       y = "USEP (SGD/MWh)", fill = "level", colour = "series", shape = "one-day model")
-save_fig(p6, "fig6_september_path.png", 8, 5.5)
+september_fc <- forecast_30("SARIMA", price_history$DailyUSEP)
+september_fc$model  # frozen specification with the re-estimated parameters
 ```
 
 ### 30-day backtest
 
-How well do 30-day paths of this kind forecast? The exercise is repeated inside the 2025 validation period and inside the 2026 test period. A path starts on every 7th day from 1 January (the weekly re-estimation days of the rolling forecasts) and is kept only if all 30 days lie inside the period. For each path the frozen SARIMA and ETS specifications are re-estimated on all data before its first day and forecast 30 days. `naive()` (the last price) and `snaive()` (the same weekday of the last week) forecasts from the same data are the benchmarks; at steps 7 and 14 the two coincide, because both equal the last observed price.
+How well do 30-day paths of this kind forecast? The exercise is repeated inside the 2025 validation period and inside the 2026 test period. A path starts on every 7th day from 1 January (the weekly re-estimation days of the rolling forecasts) and is kept only if all 30 days lie inside the period. For each path the frozen SARIMA and ETS specifications are re-estimated on all data before its first day and forecast 30 days. `naive()` (the last price) and `snaive()` (the same weekday of the last week) forecasts from the same data are the benchmarks. The backtest has three uses: it compares the models with the benchmarks, it decides between SARIMA and ETS, and its errors give the intervals of the September forecast.
+
+Empirical intervals follow the rule of the one-day intervals: the radius is the absolute error of rank ⌈(n + 1)(1 − α)⌉, applied symmetrically around the point forecast. The errors are pooled by band of forecast days (1–7, 8–14, 15–30), and for the 30-day average price there is one error per path. As a calibration check, the radius is taken from the 2025 errors and its coverage is counted on the 2026 paths.
 
 ```{r horizon-backtest}
-backtest_models <- c("Naive", "SeasonalNaive", path_models)
+backtest_models <- c("Naive", "SeasonalNaive", "SARIMA", "ETS")
 
 # First days of the 30-day paths: every 7th day of the period, kept only if the whole path lies inside it
 backtest_origins <- function(dates) {
@@ -1292,25 +1251,70 @@ run_backtest <- function(period, dates) bind_rows(lapply(backtest_origins(dates)
 }))
 backtest <- bind_rows(run_backtest("Validation 2025", validation_dates), run_backtest("Test 2026", test_dates))
 stopifnot(!anyNA(backtest), max(backtest$Date[backtest$Period == "Validation 2025"]) <= validation_end, max(backtest$Date) <= end_date)
+backtest$Band <- band_of(backtest$Step)
 
-horizon_groups <- list("Day 1" = 1L, "Day 7" = 7L, "Day 14" = 14L, "Day 30" = 30L,
-                       "Days 1-7" = 1:7, "Days 8-14" = 8:14, "Days 15-30" = 15:30)
-horizon_backtest <- bind_rows(lapply(names(horizon_groups), function(group)
-  backtest |>
-    filter(Step %in% horizon_groups[[group]]) |>
+# 30-day average price: one actual and one forecast per path (no model interval is available for the average)
+path_means <- backtest |>
+  group_by(Period, Origin, Model) |>
+  summarise(Actual = mean(Actual), Prediction = mean(Prediction), .groups = "drop") |>
+  mutate(Lower80 = NA_real_, Upper80 = NA_real_, Lower95 = NA_real_, Upper95 = NA_real_)
+
+# Accuracy, mean error (actual - forecast; positive = under-prediction) and coverage of the model's own intervals
+accuracy_rows <- function(data, group) {
+  data |>
     group_by(Period, Model) |>
     summarise(Horizon = group, Paths = n_distinct(Origin), N = n(),
               RMSE = sqrt(mean((Actual - Prediction)^2)), MAE = mean(abs(Actual - Prediction)),
-              Coverage80 = mean(Actual >= Lower80 & Actual <= Upper80),
-              Coverage95 = mean(Actual >= Lower95 & Actual <= Upper95), .groups = "drop"))) |>
+              MeanError = mean(Actual - Prediction),
+              ModelCoverage80 = mean(Actual >= Lower80 & Actual <= Upper80),
+              ModelCoverage95 = mean(Actual >= Lower95 & Actual <= Upper95), .groups = "drop")
+}
+horizon_groups <- c(list("Day 1" = 1L, "Day 7" = 7L, "Day 14" = 14L, "Day 30" = 30L), bands)
+horizon_backtest <- bind_rows(
+  bind_rows(lapply(names(horizon_groups), function(group) accuracy_rows(filter(backtest, Step %in% horizon_groups[[group]]), group))),
+  accuracy_rows(path_means, "30-day mean")) |>
   group_by(Period, Horizon) |>
   mutate(RMSE_gain_vs_Naive  = 1 - RMSE / RMSE[Model == "Naive"],
          RMSE_gain_vs_SNaive = 1 - RMSE / RMSE[Model == "SeasonalNaive"]) |>
-  ungroup() |>
-  arrange(match(Period, c("Validation 2025", "Test 2026")), match(Horizon, names(horizon_groups)), match(Model, backtest_models)) |>
-  select(Period, Horizon, Model, Paths, N, RMSE, MAE, RMSE_gain_vs_Naive, RMSE_gain_vs_SNaive, Coverage80, Coverage95)
-kable(horizon_backtest, digits = 3,
-      caption = "30-day backtest by forecast step: accuracy against the benchmarks and coverage of the 80% and 95% model intervals")
+  ungroup()
+
+# Empirical interval radius: the rank rule of the one-day intervals, on all errors of a group
+error_radius <- function(errors, alpha) {
+  errors <- sort(abs(errors))
+  errors[min(length(errors), ceiling((length(errors) + 1L) * (1 - alpha)))]
+}
+# Errors behind the intervals: every forecast day in its band, and one error per path for the 30-day average
+interval_groups <- c(names(bands), "30-day mean")
+interval_errors <- bind_rows(transmute(backtest, Period, Model, Group = Band, Error = Actual - Prediction),
+                             transmute(path_means, Period, Model, Group = "30-day mean", Error = Actual - Prediction))
+group_errors <- function(kind, group, periods) {
+  interval_errors$Error[interval_errors$Model == kind & interval_errors$Group == group & interval_errors$Period %in% periods]
+}
+
+# Calibration check: radius from the 2025 errors, coverage counted on the 2026 paths
+calibration <- bind_rows(lapply(backtest_models, function(kind) bind_rows(lapply(interval_groups, function(group) {
+  radius <- c(error_radius(group_errors(kind, group, "Validation 2025"), 0.20),
+              error_radius(group_errors(kind, group, "Validation 2025"), 0.05))
+  test_errors <- abs(group_errors(kind, group, "Test 2026"))
+  data.frame(Period = "Test 2026", Horizon = group, Model = kind,
+             EmpiricalRadius80 = radius[1], EmpiricalRadius95 = radius[2],
+             EmpiricalCoverage80 = mean(test_errors <= radius[1]), EmpiricalCoverage95 = mean(test_errors <= radius[2]))
+}))))
+# Final radius for the September forecast: the same rule on the errors of both periods
+both_periods <- c("Validation 2025", "Test 2026")
+final_radius <- function(kind, group, alpha) error_radius(group_errors(kind, group, both_periods), alpha)
+
+horizon_backtest <- horizon_backtest |>
+  left_join(calibration, by = c("Period", "Horizon", "Model")) |>
+  arrange(match(Period, c("Validation 2025", "Test 2026")), match(Horizon, c(names(horizon_groups), "30-day mean")),
+          match(Model, backtest_models)) |>
+  select(Period, Horizon, Model, Paths, N, RMSE, MAE, MeanError, RMSE_gain_vs_Naive, RMSE_gain_vs_SNaive,
+         ModelCoverage80, ModelCoverage95, EmpiricalRadius80, EmpiricalRadius95, EmpiricalCoverage80, EmpiricalCoverage95)
+kable(select(horizon_backtest, Period:ModelCoverage95), digits = 3,
+      caption = "30-day backtest: accuracy against the benchmarks and coverage of the models' own 80% and 95% intervals")
+kable(horizon_backtest |> filter(!is.na(EmpiricalCoverage80)) |>
+        select(Horizon, Model, N, EmpiricalRadius80, EmpiricalRadius95, EmpiricalCoverage80, EmpiricalCoverage95), digits = 3,
+      caption = "Calibration check: empirical intervals with the radius taken from the 2025 backtest errors, coverage on the 2026 paths (radius in SGD/MWh)")
 
 # Check: day 1 of each path against the cached one-step forecast for the same day, which the full run made
 # with the same specification on the same re-estimation day
@@ -1326,50 +1330,117 @@ kable(day1_check, digits = 3,
 
 ```{r month-ahead-text, echo = FALSE}
 # Helpers for the numbers quoted in the text below, so that the text always matches the tables
-bt <- function(period, kind, group, column)
+bt <- function(period, kind, group, column) {
   horizon_backtest[[column]][horizon_backtest$Period == period & horizon_backtest$Model == kind & horizon_backtest$Horizon == group]
+}
 num <- function(x, digits = 1) formatC(x, format = "f", digits = digits)
 pct <- function(x, digits = 0) formatC(100 * x, format = "f", digits = digits)
 versus <- function(gain) paste(pct(abs(gain)), "%", if (gain >= 0) "lower" else "higher")  # RMSE relative to a benchmark
-gain_range <- function(period, kind, column) {  # smallest to largest gain over the three bands
-  gains <- vapply(c("Days 1-7", "Days 8-14", "Days 15-30"), function(group) bt(period, kind, group, column), numeric(1))
-  paste0(pct(min(gains)), " to ", pct(max(gains)), " %")
+in_bands <- function(period, kind, column, digits = 1) {  # the three bands, in order
+  values <- vapply(names(bands), function(group) bt(period, kind, group, column), numeric(1))
+  paste0(num(values[1], digits), ", ", num(values[2], digits), " and ", num(values[3], digits))
+}
+pct_bands <- function(column) {  # 2026 calibration coverage of SARIMA in the three bands
+  values <- vapply(names(bands), function(group) bt("Test 2026", "SARIMA", group, column), numeric(1))
+  paste0(pct(values[1]), ", ", pct(values[2]), " and ", pct(values[3]), " %")
 }
 n_paths <- c(Validation = length(backtest_origins(validation_dates)), Test = length(backtest_origins(test_dates)))
-band_rows <- horizon_backtest[horizon_backtest$Model %in% path_models & grepl("^Days", horizon_backtest$Horizon), ]
-day_rows  <- horizon_backtest[horizon_backtest$Model %in% path_models & grepl("^Day ", horizon_backtest$Horizon), ]
-best_2026 <- max(band_rows$RMSE_gain_vs_Naive[band_rows$Period == "Test 2026"], 0)
-lowest <- function(column) {  # single step with the lowest coverage
-  row <- day_rows[which.min(day_rows[[column]]), ]
-  paste0(pct(row[[column]], 1), " % (", row$Model, ", ", tolower(row$Horizon), ", ", row$Period, ")")
+band_rows <- horizon_backtest[horizon_backtest$Model %in% c("SARIMA", "ETS") & horizon_backtest$Horizon %in% names(bands), ]
+final_bands <- function(alpha) paste0(num(final_radius("SARIMA", "Days 1-7", alpha)), ", ", num(final_radius("SARIMA", "Days 8-14", alpha)),
+                                      " and ", num(final_radius("SARIMA", "Days 15-30", alpha)))
+share_inside <- function(period, alpha) {  # share of one period's errors inside the final (pooled) intervals, by band
+  shares <- vapply(names(bands), function(group) mean(abs(group_errors("SARIMA", group, period)) <= final_radius("SARIMA", group, alpha)), numeric(1))
+  paste0(pct(shares[1]), ", ", pct(shares[2]), " and ", pct(shares[3]), " %")
 }
-step_row <- function(kind, step) september_long[september_long$Model == kind & september_long$Step == step, ]
-width <- function(kind, step, level) step_row(kind, step)[[paste0("Upper", level)]] - step_row(kind, step)[[paste0("Lower", level)]]
-first_negative <- function(kind, bound) min(september_long$Step[september_long$Model == kind & september_long[[bound]] < 0])
-ets_states <- september_fc$ETS$model$states
-ets_slope <- if ("b" %in% colnames(ets_states)) ets_states[nrow(ets_states), "b"] else 0  # last trend state, extrapolated over the path
+band_counts <- function(periods) range(vapply(names(bands), function(group) length(group_errors("SARIMA", group, periods)), numeric(1)))
 one_step_rmse <- function(column) accuracy_table[[column]][accuracy_table$Model == "SARIMA"]
-empirical_80 <- next_day$Upper80[next_day$Model == "SARIMA"] - next_day$Lower80[next_day$Model == "SARIMA"]
+one_day_radius <- (next_day$Upper80[next_day$Model == "SARIMA"] - next_day$Lower80[next_day$Model == "SARIMA"]) / 2
+model_radius_day1 <- as.numeric(september_fc$upper[1, "80%"] - september_fc$lower[1, "80%"]) / 2
 ```
 
-**Backtest results.** There are `r n_paths[["Validation"]]` paths in 2025 and `r n_paths[["Test"]]` in 2026. The two periods disagree.
+**Bands, not single days.** The text below reads the three bands and the 30-day average only. Paths start 7 days apart, so within a period a given step always falls on the same weekday: every 2025 path starts on a `r format(validation_dates[1], "%A")` and every 2026 path on a `r format(test_dates[1], "%A")`. A single-step row therefore mixes the horizon with a weekday effect, and it rests on only `r n_paths[["Test"]]` to `r n_paths[["Validation"]]` forecasts. The single-step rows are kept in the table for completeness.
 
-- *2025.* SARIMA beats both benchmarks in every band: its RMSE is `r versus(bt("Validation 2025", "SARIMA", "Days 1-7", "RMSE_gain_vs_Naive"))` than Naive's for days 1–7, `r versus(bt("Validation 2025", "SARIMA", "Days 8-14", "RMSE_gain_vs_Naive"))` for days 8–14 and `r versus(bt("Validation 2025", "SARIMA", "Days 15-30", "RMSE_gain_vs_Naive"))` for days 15–30. ETS gains less: `r gain_range("Validation 2025", "ETS", "RMSE_gain_vs_Naive")` against Naive and `r gain_range("Validation 2025", "ETS", "RMSE_gain_vs_SNaive")` against SeasonalNaive.
-- *2026.* The advantage is gone. For days 1–7 SARIMA's RMSE is `r versus(bt("Test 2026", "SARIMA", "Days 1-7", "RMSE_gain_vs_Naive"))` than Naive's and for days 8–14 `r versus(bt("Test 2026", "SARIMA", "Days 8-14", "RMSE_gain_vs_Naive"))`, so the two are level. For days 15–30 it is `r versus(bt("Test 2026", "SARIMA", "Days 15-30", "RMSE_gain_vs_Naive"))` than Naive's and `r versus(bt("Test 2026", "SARIMA", "Days 15-30", "RMSE_gain_vs_SNaive"))` than SeasonalNaive's. ETS is `r versus(bt("Test 2026", "ETS", "Days 1-7", "RMSE_gain_vs_Naive"))`, `r versus(bt("Test 2026", "ETS", "Days 8-14", "RMSE_gain_vs_Naive"))` and `r versus(bt("Test 2026", "ETS", "Days 15-30", "RMSE_gain_vs_Naive"))` than Naive in the three bands. On day 30 itself the RMSE is `r num(bt("Test 2026", "SARIMA", "Day 30", "RMSE"))` for SARIMA and `r num(bt("Test 2026", "ETS", "Day 30", "RMSE"))` for ETS, against `r num(bt("Test 2026", "Naive", "Day 30", "RMSE"))` for Naive.
-- *Growth with the horizon.* From days 1–7 to days 15–30 the RMSE of SARIMA rises from `r num(bt("Validation 2025", "SARIMA", "Days 1-7", "RMSE"))` to `r num(bt("Validation 2025", "SARIMA", "Days 15-30", "RMSE"))` in 2025 and from `r num(bt("Test 2026", "SARIMA", "Days 1-7", "RMSE"))` to `r num(bt("Test 2026", "SARIMA", "Days 15-30", "RMSE"))` in 2026; that of ETS from `r num(bt("Validation 2025", "ETS", "Days 1-7", "RMSE"))` to `r num(bt("Validation 2025", "ETS", "Days 15-30", "RMSE"))` and from `r num(bt("Test 2026", "ETS", "Days 1-7", "RMSE"))` to `r num(bt("Test 2026", "ETS", "Days 15-30", "RMSE"))`.
+**Accuracy against the benchmarks.** There are `r n_paths[["Validation"]]` paths in 2025 and `r n_paths[["Test"]]` in 2026. The two periods disagree.
 
-So the evidence that these paths beat the last observed price comes from 2025 only. In 2026, the period closest to September, neither model improves on Naive by more than `r pct(best_2026)` % in any band, and in the second half of the month both are worse. The September path, days 15–30 in particular, is a model-based scenario, not a forecast with demonstrated skill.
+- *2025.* SARIMA beats both benchmarks in every band: its RMSE is `r versus(bt("Validation 2025", "SARIMA", "Days 1-7", "RMSE_gain_vs_Naive"))` than Naive's for days 1–7, `r versus(bt("Validation 2025", "SARIMA", "Days 8-14", "RMSE_gain_vs_Naive"))` for days 8–14 and `r versus(bt("Validation 2025", "SARIMA", "Days 15-30", "RMSE_gain_vs_Naive"))` for days 15–30.
+- *2026.* SARIMA is level with Naive for days 1–14 and worse than Naive for days 15–30. Its RMSE is `r versus(bt("Test 2026", "SARIMA", "Days 1-7", "RMSE_gain_vs_Naive"))` than Naive's for days 1–7, `r versus(bt("Test 2026", "SARIMA", "Days 8-14", "RMSE_gain_vs_Naive"))` for days 8–14 and `r versus(bt("Test 2026", "SARIMA", "Days 15-30", "RMSE_gain_vs_Naive"))` for days 15–30, where it is also `r versus(bt("Test 2026", "SARIMA", "Days 15-30", "RMSE_gain_vs_SNaive"))` than SeasonalNaive's.
+- *Bias in 2026.* SARIMA under-predicts in 2026: its mean error (actual − forecast) in the three bands is `r in_bands("Test 2026", "SARIMA", "MeanError")` SGD/MWh, against `r in_bands("Test 2026", "Naive", "MeanError")` for Naive.
+- *30-day average price.* The RMSE of SARIMA's forecast of the 30-day average is `r num(bt("Validation 2025", "SARIMA", "30-day mean", "RMSE"))` in 2025, against `r num(bt("Validation 2025", "Naive", "30-day mean", "RMSE"))` for Naive, and `r num(bt("Test 2026", "SARIMA", "30-day mean", "RMSE"))` in 2026, against `r num(bt("Test 2026", "Naive", "30-day mean", "RMSE"))` for Naive.
+- *Growth with the horizon.* From days 1–7 to days 15–30 the RMSE of SARIMA rises from `r num(bt("Validation 2025", "SARIMA", "Days 1-7", "RMSE"))` to `r num(bt("Validation 2025", "SARIMA", "Days 15-30", "RMSE"))` in 2025 and from `r num(bt("Test 2026", "SARIMA", "Days 1-7", "RMSE"))` to `r num(bt("Test 2026", "SARIMA", "Days 15-30", "RMSE"))` in 2026.
 
-**Do the model intervals cover?** They are not too narrow. They are too wide, the 80 % interval by a large margin. Over the three bands and both periods, the 80 % intervals of SARIMA and ETS contained `r pct(min(band_rows$Coverage80))` to `r pct(max(band_rows$Coverage80))` % of the actual prices, and the 95 % intervals `r pct(min(band_rows$Coverage95))` to `r pct(max(band_rows$Coverage95))` %. At single steps the lowest coverage is `r lowest("Coverage80")` for the 80 % interval and `r lowest("Coverage95")` for the 95 % interval. The intervals are Gaussian, with an innovation variance estimated on all data up to the start of the path. SARIMA's innovation standard deviation is `r num(sqrt(september_fc$SARIMA$model$sigma2))` SGD/MWh, against a one-step RMSE of `r num(one_step_rmse("Val_RMSE"))` in 2025 and `r num(one_step_rmse("RMSE"))` in 2026, because 2021–2023 were far more volatile than 2025–2026 (Table 3). For 1 September its 80 % model interval is `r num(width("SARIMA", 1L, 80))` SGD/MWh wide, against `r num(empirical_80)` for the empirical interval in Table 15, so the two kinds of interval must not be compared. ETS has multiplicative errors with a relative standard deviation of `r num(sqrt(september_fc$ETS$model$sigma2), 2)`, and its interval widens much faster: the 80 % width goes from `r num(width("ETS", 1L, 80), 0)` on day 1 to `r num(width("ETS", horizon, 80), 0)` on day 30, against `r num(width("SARIMA", 1L, 80), 0)` to `r num(width("SARIMA", horizon, 80), 0)` for SARIMA.
+So the evidence that a SARIMA path beats the last observed price comes from 2025 only. In 2026, the period closest to September, it does not.
 
-**Why not empirical quantiles for the path.** Each step has only `r n_paths[["Validation"]]` (2025) and `r n_paths[["Test"]]` (2026) backtest errors, from overlapping paths. With `r n_paths[["Test"]]` errors the 95 % rank ⌈(n + 1) × 0.95⌉ is `r ceiling((n_paths[["Test"]] + 1) * 0.95)`, the largest error itself, so a 95 % quantile cannot be estimated stably.
+**Main model: SARIMA.** In the 2025 validation backtest SARIMA has a lower RMSE than ETS in all three bands (`r in_bands("Validation 2025", "SARIMA", "RMSE")` against `r in_bands("Validation 2025", "ETS", "RMSE")`), so SARIMA is the main model. This follows the rule used throughout: choose on the validation period, check on the test period. The 2026 backtest gives `r in_bands("Test 2026", "SARIMA", "RMSE")` for SARIMA against `r in_bands("Test 2026", "ETS", "RMSE")` for ETS: it agrees for days 1–7 and 8–14 but not for days 15–30. The choice was made only after the results of both backtests had been seen. It was not fixed in advance, and ETS stays in the backtest table.
+
+**Intervals.**
+
+- *Why by band.* A single step has only `r n_paths[["Validation"]]` (2025) or `r n_paths[["Test"]]` (2026) backtest errors, too few for a 95 % quantile. A band has `r band_counts("Validation 2025")[1]` to `r band_counts("Validation 2025")[2]` errors in 2025 and `r band_counts(both_periods)[1]` to `r band_counts(both_periods)[2]` in the two periods together.
+- *Calibration check.* With the radius taken from the 2025 errors, SARIMA's 80 % intervals contain `r pct_bands("EmpiricalCoverage80")` of the 2026 prices in the three bands, and its 95 % intervals `r pct_bands("EmpiricalCoverage95")`. For the 30-day average the figures are `r pct(bt("Test 2026", "SARIMA", "30-day mean", "EmpiricalCoverage80"))` % and `r pct(bt("Test 2026", "SARIMA", "30-day mean", "EmpiricalCoverage95"))` %. Intervals calibrated on 2025 were too narrow for 2026, and more so at longer horizons: SARIMA's absolute errors were larger in 2026 (MAE of `r in_bands("Test 2026", "SARIMA", "MAE")` in the three bands, against `r in_bands("Validation 2025", "SARIMA", "MAE")` in 2025) and biased (see above).
+- *Final intervals.* The September intervals use the errors of both periods, all dated before 31 August 2026. The radius in the three bands is `r final_bands(0.20)` SGD/MWh for the 80 % interval and `r final_bands(0.05)` for the 95 % interval. These intervals cannot be checked on new data. They mix a calm year with a more volatile one: the 80 % intervals contain `r share_inside("Validation 2025", 0.20)` of the 2025 errors in the three bands but `r share_inside("Test 2026", 0.20)` of the 2026 errors. If September resembles 2026, they are too narrow.
+- *Against the one-day interval.* For 1 September the 80 % radius here is `r num(final_radius("SARIMA", "Days 1-7", 0.20))` SGD/MWh, smaller than the `r num(one_day_radius)` of SARIMA's one-day interval in Table 15, which is calibrated on the latest 180 one-step errors only. The two differ in their calibration sample; for 1 September alone, the interval of Table 15 is the more relevant one.
+- *The model's own intervals.* They are shown for comparison and are far too wide: over the three bands and both periods the 80 % intervals of SARIMA and ETS contain `r pct(min(band_rows$ModelCoverage80))` to `r pct(max(band_rows$ModelCoverage80))` % of the actual prices and the 95 % intervals `r pct(min(band_rows$ModelCoverage95))` to `r pct(max(band_rows$ModelCoverage95))` %. They are Gaussian, and their innovation variance is dominated by the high-volatility years 2021–2023 (Table 3): SARIMA's innovation standard deviation is `r num(sqrt(september_fc$model$sigma2))` SGD/MWh, against a one-step RMSE of `r num(one_step_rmse("Val_RMSE"))` in 2025 and `r num(one_step_rmse("RMSE"))` in 2026. For 1 September the model's 80 % radius is `r num(model_radius_day1)` SGD/MWh.
+
+### September path and average price
+
+```{r september-path}
+# SARIMA path with the final empirical intervals: radius by band, from the backtest errors of both periods
+september_sarima <- path_table(september_fc, "SARIMA", september_dates)
+september_path <- data.frame(Date = september_dates, Step = seq_len(horizon), Band = band_of(seq_len(horizon)),
+                             SARIMA = september_sarima$Prediction)
+for (level in c("80", "95")) {
+  alpha <- c("80" = 0.20, "95" = 0.05)[[level]]
+  path_radius <- vapply(september_path$Band, function(band) final_radius("SARIMA", band, alpha), numeric(1), USE.NAMES = FALSE)
+  september_path[[paste0("Lower", level)]] <- september_path$SARIMA - path_radius
+  september_path[[paste0("Upper", level)]] <- september_path$SARIMA + path_radius
+}
+# the model's own intervals, for comparison only
+for (bound in c("Lower80", "Upper80", "Lower95", "Upper95")) september_path[[paste0("Model", bound)]] <- september_sarima[[bound]]
+# Naive reference: the price of 31 August carried forward
+september_path$Naive <- as.numeric(forecast_30("Naive", price_history$DailyUSEP)$mean)
+kable(september_path, digits = 1,
+      caption = "September 2026: SARIMA path with empirical 80% and 95% intervals, the model's own intervals for comparison, and the Naive reference (SGD/MWh)")
+
+# September average price: mean of the 30 daily point forecasts; interval from the backtest errors of the 30-day average
+september_mean <- bind_rows(lapply(c("SARIMA", "Naive"), function(kind) {
+  point <- mean(september_path[[kind]])
+  radius <- c(final_radius(kind, "30-day mean", 0.20), final_radius(kind, "30-day mean", 0.05))
+  data.frame(Model = kind, MonthMean = point, Lower80 = point - radius[1], Upper80 = point + radius[1],
+             Lower95 = point - radius[2], Upper95 = point + radius[2])
+}))
+kable(september_mean, digits = 1,
+      caption = "September 2026 average price: point forecast with empirical 80% and 95% intervals (SGD/MWh)")
+```
+
+```{r fig6, fig.height = 4}
+last_month <- daily[daily$Date >= as.Date(format(end_date, "%Y-%m-01")) & daily$Date <= end_date, c("Date", "DailyUSEP")]
+xgb_next <- next_prediction[next_prediction$Model == "XGBoost", c("Date", "Prediction")]
+path_series <- c("Actual", "SARIMA forecast", "Naive (31 Aug price)")
+p6 <- ggplot(september_path, aes(x = Date)) +
+  geom_ribbon(aes(ymin = Lower95, ymax = Upper95, fill = "95%")) +
+  geom_ribbon(aes(ymin = Lower80, ymax = Upper80, fill = "80%")) +
+  geom_line(data = last_month, aes(y = DailyUSEP, colour = "Actual", linetype = "Actual")) +
+  geom_line(aes(y = Naive, colour = "Naive (31 Aug price)", linetype = "Naive (31 Aug price)")) +
+  geom_line(aes(y = SARIMA, colour = "SARIMA forecast", linetype = "SARIMA forecast")) +
+  geom_point(data = xgb_next, aes(y = Prediction, shape = "XGBoost, 1 Sep only"), colour = "white",
+             fill = model_colours[["XGBoost"]], size = 2.5, stroke = 0.8) +
+  scale_fill_manual(values = c("80%" = "#596DD5", "95%" = "#D5DBFF")) +
+  scale_colour_manual(values = setNames(c("black", "#0000AA", "black"), path_series), breaks = path_series) +
+  scale_linetype_manual(values = setNames(c("solid", "solid", "dashed"), path_series), breaks = path_series) +
+  scale_shape_manual(values = c("XGBoost, 1 Sep only" = 21)) +
+  labs(title = "September 2026: SARIMA 30-day path with empirical intervals",
+       subtitle = "Intervals from 30-day backtest errors by band (days 1-7, 8-14, 15-30). No September actual is used.",
+       y = "USEP (SGD/MWh)", fill = "level", colour = "series", linetype = "series", shape = "one-day model")
+save_fig(p6, "fig6_september_path.png", 8, 4)
+```
+
+**How to read the outlook.** It gives a price level and a range of uncertainty, not a direction. In the 2026 backtest SARIMA is level with Naive for days 1–14 and worse than Naive for days 15–30, so the path is not evidence that prices will move away from the 31 August price. The SARIMA forecast of the September average is `r num(september_mean$MonthMean[september_mean$Model == "SARIMA"])` SGD/MWh and the Naive one `r num(september_mean$MonthMean[september_mean$Model == "Naive"])`; the gap between them, `r num(abs(diff(september_mean$MonthMean)))`, is smaller than the 80 % radius of the SARIMA average, `r num(final_radius("SARIMA", "30-day mean", 0.20))`.
 
 **Limitations.**
 
-- *ETS trend.* ETS(M,A,M) extrapolates its last additive trend, `r num(ets_slope, 2)` SGD/MWh per day, over the whole month. Nothing guarantees that this trend continues, and the ETS path keeps drifting while the SARIMA path flattens near `r num(step_row("SARIMA", horizon)$Prediction, 0)` SGD/MWh.
-- *Intervals.* The model intervals over-cover and are not calibrated 80 % and 95 % ranges. They also reach below zero: the ETS 80 % lower bound from day `r first_negative("ETS", "Lower80")` and the SARIMA 95 % lower bound from day `r first_negative("SARIMA", "Lower95")`, while the lowest daily price in the sample is `r num(min(price_history$DailyUSEP))` SGD/MWh.
-- *Small backtest.* `r n_paths[["Validation"]]` and `r n_paths[["Test"]]` paths, started 7 days apart and 30 days long, overlap heavily, so their errors are strongly dependent. Each period is a single year (2026 only to August), and the two give different answers.
-- *Price history only.* The paths use no information on September demand, fuel prices, reserve prices or weather, and the two specifications were selected by `auto.arima()` and `ets()` on one-step fit, not on 30-day accuracy.
+- *Intervals.* The empirical intervals are symmetric, use one radius per band, and are calibrated on only two periods. The calibration check found them too narrow in 2026 when calibrated on 2025, and the final intervals cannot be checked on new data.
+- *Small backtest.* `r n_paths[["Validation"]]` and `r n_paths[["Test"]]` paths, started 7 days apart and 30 days long, overlap heavily, so their errors are strongly dependent and count for far fewer independent observations. Each period is a single year (2026 only to August), and the two give different answers.
+- *Model choice after the fact.* SARIMA was made the main model after both backtests had been seen.
+- *Price history only.* The path uses no information on September demand, fuel prices, reserve prices or weather, and the SARIMA specification was selected by `auto.arima()` on one-step fit, not on 30-day accuracy.
 - *Numerical reproducibility.* Both models are estimated by numerical optimisation. Day 1 of each backtest path repeats a cached one-step forecast of the full run, with the same specification, data and re-estimation day. In this document the two differ by at most `r num(day1_check$MaxAbsDifference[day1_check$Model == "SARIMA"], 2)` SGD/MWh for SARIMA and `r num(day1_check$MaxAbsDifference[day1_check$Model == "ETS"], 2)` for ETS, where `r day1_check$PathsOver0.01[day1_check$Model == "ETS"]` of `r day1_check$Paths[day1_check$Model == "ETS"]` paths differ by more than 0.01. The full run and this knit can be on different machines, whose daily means differ in their last floating-point digits, and the ETS estimates are sensitive to that. The ETS rows of the backtest should therefore be read to the nearest unit, not to the decimals shown; SARIMA is far less affected.
 
 # Export
@@ -1396,7 +1467,7 @@ write_xlsx(list(Descriptive = annual, Stationarity = stationarity, Frozen_Settin
                 DM_External = as_table(dm11), Incremental = incremental_scores,
                 Ancillary_Variants = ancillary_table, Ancillary_DM = ancillary_dm, Intervals = interval_summary,
                 TPC = tpc_log, Spike_Normal = spike_table, NextDay = next_day, Intervals_Daily = intervals,
-                Sept_Path = september_path, Horizon_Backtest = horizon_backtest),
+                Sept_Path = september_path, Sept_Mean = september_mean, Horizon_Backtest = horizon_backtest),
            file.path(output_dir, "report_tables.xlsx"))
 ```
 
