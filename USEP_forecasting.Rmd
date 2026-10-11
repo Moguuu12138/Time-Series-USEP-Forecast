@@ -946,6 +946,12 @@ Why the reserve and regulation prices (step M2) hurt the dynamic regression: the
 ```{r ancillary-check}
 train_rows <- daily$Sample == "Train"
 test_rows  <- daily$Sample == "Test"
+ancillary_check <- data.frame(
+  Sample = c("Train", "Test"),
+  PrimaryReserveMean = c(mean(daily$PrimaryReserve[train_rows]),
+                         mean(daily$PrimaryReserve[test_rows])),
+  ContingencyRegulationCorrelation = c(
+    cor(daily$ContingencyReserve[train_rows], daily$Regulation[train_rows]), NA_real_))
 data.frame(Sample = c("Train", "Test"),
            Mean     = c(mean(daily$PrimaryReserve[train_rows]), mean(daily$PrimaryReserve[test_rows])),
            Median   = c(median(daily$PrimaryReserve[train_rows]), median(daily$PrimaryReserve[test_rows])),
@@ -1464,6 +1470,7 @@ write_xlsx(list(Descriptive = annual, Stationarity = stationarity, Frozen_Settin
                 DM_vs_Naive = as_table(dm9), DM_Top3 = as_table(dm10), DM_Holm = as_table(p_holm),
                 Regime = regime, Bias_Top3 = bias_table, Concentration = concentration,
                 DM_External = as_table(dm11), Incremental = incremental_scores,
+                Ancillary_Check = ancillary_check,
                 Ancillary_Variants = ancillary_table, Ancillary_DM = ancillary_dm, Intervals = interval_summary,
                 TPC = tpc_log, Spike_Normal = spike_table, NextDay = next_day, Intervals_Daily = intervals,
                 Sept_Path = september_path, Sept_Mean = september_mean, Horizon_Backtest = horizon_backtest),
