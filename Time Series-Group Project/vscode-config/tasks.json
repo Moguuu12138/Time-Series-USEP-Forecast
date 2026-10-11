@@ -1,0 +1,33 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "R: knit (saved model results)",
+      "type": "process",
+      "command": "Rscript",
+      "args": ["-e", "rmarkdown::render('USEP_forecasting.Rmd')"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "R: knit with full model re-run (several hours)",
+      "type": "process",
+      "command": "Rscript",
+      "args": ["-e", "rmarkdown::render('USEP_forecasting.Rmd', params = list(run_models = TRUE))"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "R: install packages",
+      "type": "process",
+      "command": "Rscript",
+      "args": [
+        "-e",
+        "options(repos = c(CRAN = 'https://cloud.r-project.org')); install.packages(c('rmarkdown', 'knitr', 'readxl', 'writexl', 'fpp3', 'forecast', 'tseries', 'languageserver')); install.packages('httpgd', repos = c('https://community.r-multiverse.org', 'https://cloud.r-project.org'))"
+      ],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    }
+  ]
+}

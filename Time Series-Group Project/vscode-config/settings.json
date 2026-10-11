@@ -1,0 +1,18 @@
+{
+  "files.associations": {
+    "*.Rmd": "rmd"
+  },
+  "files.exclude": {
+    "**/.DS_Store": true
+  },
+  "r.plot.useHttpgd": true,
+  "r.sessionWatcher": true,
+  "r.rmarkdown.enableCodeLens": true,
+  "r.lsp.diagnostics": true,
+  "[r]": {
+    "editor.tabSize": 2
+  },
+  "[rmd]": {
+    "editor.tabSize": 2
+  }
+}
