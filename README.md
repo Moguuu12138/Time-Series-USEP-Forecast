@@ -20,12 +20,21 @@ report/                  报告修订稿（红字为修改处）
 
 ## 两种运行方式
 
-| 设置 | 做什么 | 时间 |
-|---|---|---|
-| `run_models: false`（默认） | 读取 output/ 里已保存的模型预测，重算全部检验、表格和图 | 几分钟 |
-| `run_models: true` | 从头调参并重跑六个模型，覆盖三个缓存文件 | 数小时；另需 xgboost、keras3 和 TensorFlow |
+由 Rmd 开头的参数 `run_models` 控制。两种模式下，每次 knit 都会重新生成 `output/processed_data.xlsx`、`output/report_tables.xlsx` 和 `output/figures/`。
 
-保存的完整运行环境：R 4.6.1、TensorFlow 2.21.0、Keras 3.15.1。
+| 代码块（章节） | `run_models: false`（默认，几分钟） | `run_models: true`（数小时；另需 xgboost、keras3 和 TensorFlow） |
+|---|---|---|
+| `packages` 至 `candidates`（第 1–2 节：数据处理、特征、描述统计、平稳性检验、函数定义） | 运行；不加载 xgboost 和 keras3，`rolling_predict()` 不会被调用 | 运行 |
+| `tuning`（第 3 节） | 跳过 | 运行：在 2025 年验证期对全部模型调参，写入 `output/model_runs.rds` |
+| `test-forecasts`（第 4 节） | 跳过 | 运行：测试期、M0–M4 和 9 月 1 日预测；覆盖 `output/model_runs.rds` 和 `output/model_forecasts.xlsx` |
+| `load-models`（第 4.1 节） | 读取 `output/model_runs.rds`（冻结设置、验证期与测试期预测）和 `output/model_forecasts.xlsx`（M0–M4 预测、9 月 1 日预测、调参日志、TPC 结果） | 不读缓存，直接使用刚算出的结果 |
+| `ancillary-robustness`（第 5.5 节） | 读取 `output/ancillary_robustness.rds` | 重跑 24 个变体，覆盖 `output/ancillary_robustness.rds` |
+| 第 5–9 节的其余代码块（检验、表格、图、导出、sessionInfo） | 运行，基于缓存的预测重算 | 运行，基于新的预测重算 |
+
+- 默认模式不调参，也不做任何滚动预测：除 Naive（前一日价格）外，所有点预测（包括 SeasonalNaive）都来自缓存；`insample-residuals` 只是为残差诊断在训练期把四个传统模型各拟合一次。
+- `run_models: true` 会覆盖三个文件：`output/model_runs.rds`、`output/model_forecasts.xlsx`、`output/ancillary_robustness.rds`。原内容无法恢复，完整重跑前请先备份。
+- 缓存预测的核实情况：XGBoost 的缓存预测已用本代码重跑核实，结果完全一致；LSTM 的缓存预测来自此前一次运行，模型代码相同，但未在本环境重跑，因 TensorFlow 版本和硬件不同，重跑可能有小幅差异。
+- 软件版本见 knit 输出文末的 `sessionInfo()`；`run_models: true` 时另外打印 TensorFlow 和 Keras 的版本。
 
 ## 在 VS Code 里像 RStudio 一样运行 R（macOS，一次性设置）
 

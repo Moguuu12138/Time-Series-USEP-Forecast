@@ -17,12 +17,22 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
                       fig.width = 8, fig.height = 4, dpi = 120)
 ```
 
-**How to run.** The eight raw Excel files are in `data/` and are never modified. All exported tables and figures go to `output/`.
+**How to run.** The eight raw Excel files are in `data/` and are never modified. All exported tables and figures go to `output/`. The parameter `run_models` selects one of two modes; in both, every knit regenerates `output/processed_data.xlsx`, `output/report_tables.xlsx` and `output/figures/`.
 
-- `run_models: false` (default): sections 1, 2 and 5–8 run in a few minutes. The model forecasts of the full run (sections 3–4) are loaded from `output/model_runs.rds` and `output/model_forecasts.xlsx`; the ancillary-price robustness forecasts from `output/ancillary_robustness.rds`.
-- `run_models: true`: re-tunes and re-runs every model (several hours; needs `xgboost` and `keras3` with a TensorFlow backend) and overwrites those three files.
+| Chunks (section) | `run_models: false` (default; a few minutes) | `run_models: true` (several hours; needs `xgboost` and `keras3` with a TensorFlow backend) |
+|---|---|---|
+| `packages` to `candidates` (1–2): data processing, features, descriptive statistics, stationarity tests, function definitions | run; `xgboost` and `keras3` are not loaded and `rolling_predict()` is never called | run |
+| `tuning` (3) | skipped | runs: tunes every model on 2025 and writes `output/model_runs.rds` |
+| `test-forecasts` (4) | skipped | runs: test, M0–M4 and 1 September forecasts; overwrites `output/model_runs.rds` and `output/model_forecasts.xlsx` |
+| `load-models` (4.1) | reads `output/model_runs.rds` (frozen settings, validation and test forecasts) and `output/model_forecasts.xlsx` (M0–M4 forecasts, 1 September forecasts, tuning log, TPC results) | reads no cache; uses the objects just computed |
+| `ancillary-robustness` (5.5) | reads `output/ancillary_robustness.rds` | re-runs the 24 variants and overwrites `output/ancillary_robustness.rds` |
+| all other chunks of 5–9: tests, tables, figures, export, session information | run, on the cached forecasts | run, on the new forecasts |
 
-The saved full run used R 4.6.1, TensorFlow 2.21.0 and Keras 3.15.1.
+- The default mode tunes nothing and makes no rolling forecast. Every point forecast except Naive (yesterday's price) comes from the cache, SeasonalNaive included; `insample-residuals` only fits the four traditional models once on the training period for the residual diagnostics.
+- `run_models: true` overwrites three files: `output/model_runs.rds`, `output/model_forecasts.xlsx` and `output/ancillary_robustness.rds`. Their previous contents are lost, so keep a copy before a full run.
+- Status of the cached forecasts: the cached XGBoost forecasts have been re-run with this code and reproduce exactly. The cached LSTM forecasts come from an earlier run with the same model code; they have not been re-run in the present environment, and because the TensorFlow version and the hardware differ, a re-run may give slightly different numbers.
+
+Software versions: see `sessionInfo()` at the end of this document; a full run also prints the TensorFlow and Keras versions there.
 
 ```{r packages}
 # TRUE only when knitting with params = list(run_models = TRUE)
@@ -70,6 +80,8 @@ refit_days     <- 7L                     # model parameters are re-estimated eve
 
 Each EMC file has 48 half-hourly trading periods per day. The daily value is the mean of the 48 periods. The code stops if a day has a duplicate, a missing value or fewer than 48 periods. Negative prices and spikes are kept.
 
+The data end on `end_date` (31 August 2026). The EMC files run past that date, so later rows are dropped as soon as each file is read, and the fuel quotes are cut in the same way in the next section: no value after 31 August 2026 is used or shown anywhere in this document.
+
 ```{r market-data}
 read_market <- function(file, value_column, variable) {
   raw <- as.data.frame(read_excel(file.path(data_dir, file), sheet = "Raw", .name_repair = "minimal"))
@@ -77,6 +89,7 @@ read_market <- function(file, value_column, variable) {
   raw <- data.frame(Date   = as.Date(raw[["DATE"]]),
                     Period = as.integer(raw[["PERIOD"]]),
                     Value  = as.numeric(raw[[value_column]]))
+  raw <- raw[raw$Date <= end_date, ]  # data cut-off: rows after end_date are discarded here
   raw <- raw[order(raw$Date, raw$Period), ]
   stopifnot(!anyDuplicated(raw[c("Date", "Period")]), all(raw$Period %in% 1:48), !anyNA(raw))
   daily <- raw |> group_by(Date) |> summarise(N = n(), Value = mean(Value), .groups = "drop")
@@ -91,6 +104,8 @@ demand      <- read_market("NEM_Demand_Forecast.xlsx", "DEMAND (MW)", "DemandMea
 primary     <- read_market("Primary_Reserve_Price.xlsx", "PRICE ($/MWh)", "PrimaryReserve")
 contingency <- read_market("Contingency_Reserve_Price.xlsx", "PRICE ($/MWh)", "ContingencyReserve")
 regulation  <- read_market("Regulation_Price.xlsx", "PRICE ($/MWh)", "Regulation")
+stopifnot(max(usep$Date) == end_date,  # USEP ends exactly on the cut-off
+          max(c(demand$Date, primary$Date, contingency$Date, regulation$Date)) <= end_date)
 ```
 
 ## Fuel price: Brent in SGD
@@ -117,6 +132,10 @@ fx$Month <- match(fx$Month, month.abb)
 fx$Date  <- as.Date(sprintf("%s-%02d-%02d", fx$Year, fx$Month, fx$Day))
 fx <- fx[order(fx$Date), c("Date", "USD_SGD")]
 stopifnot(!anyDuplicated(fx$Date), !anyNA(fx))
+
+# data cut-off: quotes after end_date are discarded; the forecast-day row then carries the last quote forward
+brent <- brent[brent$Date <= end_date, ]
+fx    <- fx[fx$Date <= end_date, ]
 
 # The calendar starts before 2021 so that 1-3 Jan 2021 use the 31 Dec 2020 rate
 fuel <- data.frame(Date = seq(min(min(brent$Date), min(fx$Date)), end_date + 1L, by = "day"))
@@ -161,7 +180,8 @@ holidays_2025 <- paste0("2025-", c("01-01", "01-29", "01-30", "03-31", "04-18", 
 holidays_2026 <- paste0("2026-", c("01-01", "02-17", "02-18", "03-21", "04-03", "05-01", "05-27", "05-31", "06-01", "08-09", "08-10", "11-08", "11-09", "12-25"))
 holiday_dates <- as.Date(c(holidays_2021, holidays_2022, holidays_2023, holidays_2024, holidays_2025, holidays_2026))
 
-# One extra row (2026-09-01) is used only for the final next-day forecast; it is never scored
+# One extra row (2026-09-01) is the target day of the final next-day forecast. It holds calendar variables and
+# the carried-forward fuel quote only: every series is cut at end_date, so it has no observed value and is never scored
 daily <- data.frame(Date = seq(start_date, end_date + 1L, by = "day"))
 daily <- daily |>
   left_join(usep, by = "Date") |> left_join(demand, by = "Date") |>
@@ -182,6 +202,8 @@ daily$Sample <- ifelse(daily$Date <= train_end, "Train",
                 ifelse(daily$Date <= validation_end, "Validation",
                 ifelse(daily$Date <= end_date, "Test", "Forecast")))
 stopifnot(all(diff(daily$Date) == 1L), !anyNA(daily$DailyUSEP[daily$Date <= end_date]))
+# no market value after the data cut-off is in the table
+stopifnot(all(is.na(daily[daily$Date > end_date, c("DailyUSEP", "DemandMean", "PrimaryReserve", "ContingencyReserve", "Regulation")])))
 ```
 
 ## Temperature gaps: ridge reconstruction
@@ -817,7 +839,7 @@ save_fig(p4, "fig4_rmse.png", 8, 3)
 
 ## Residual diagnostics
 
-**In-sample (traditional models).** The frozen ETS, SARIMA, TSLM and dynamic-regression specifications are fitted to the training period, as at the first validation re-estimation. `checkresiduals()` gives Ljung-Box tests (Breusch-Godfrey for TSLM) at 14 lags.
+**In-sample (traditional models).** The frozen ETS, SARIMA, TSLM and dynamic-regression specifications are fitted to the training period, as at the first validation re-estimation. `checkresiduals()` gives a Ljung-Box test at 14 lags for ETS, SARIMA and the dynamic regression, and a Breusch-Godfrey test of order 22 for TSLM. Its default lag is max(2 × 7, number of model coefficients + 3), and the TSLM has 19 coefficients (18 regressors and the intercept), so the order is 22, not 14.
 
 ```{r insample-residuals, fig.height = 4.5}
 train_dat <- initial_data[initial_data$Date >= warmup_date, ]
@@ -943,6 +965,8 @@ rbind(DynamicRegression = c(sq = dm(incremental_prediction, "DynamicRegression_M
 ```
 
 ## Ancillary-price robustness
+
+**Post-hoc and exploratory.** The four treatments in this section were designed only after the test-period results had shown that the M2 block makes the forecasts worse. They are not part of the design fixed before the test period, so their test-period results are exploratory, and they change neither the frozen settings nor the recommended model.
 
 Two fixes for the M2 block are tried together: the primary-reserve price enters as log(1 + x) or is dropped, and only one of the two highly correlated contingency-reserve and regulation prices is kept. The four combinations are one more tuning choice: for each model and step M2–M4, the combination and the hyperparameters with the lowest 2025 validation RMSE are frozen and then forecast on 2026, as for M0–M4. *The forecasts are made only when `run_models = TRUE` and saved to `output/ancillary_robustness.rds`; otherwise that file is read back.*
 
@@ -1124,14 +1148,34 @@ kable(concentration, digits = 2, caption = "Concentration of the test-best model
 
 # Next-day forecast: 1 September 2026
 
-Forecasts for the first day after the data end, made with the frozen settings. The realised value (mean of the 48 periods in `USEP.xlsx`) is shown only for comparison.
+Forecasts for the first day after the data end, made with the frozen settings and data up to 31 August 2026. No September value is read, so these forecasts are not scored. Naive is the price of 31 August 2026.
+
+The 80 % and 95 % intervals follow the rule of the *Prediction intervals* section: the radius is the finite-sample quantile, rank ⌈(n + 1)(1 − α)⌉, of the latest (at most 180, at least 100) one-step absolute errors realised up to 31 August 2026, applied symmetrically around the point forecast.
 
 ```{r next-day}
-next_day <- next_prediction
-next_day$Actual <- usep$DailyUSEP[usep$Date == end_date + 1L]
-next_day$Error  <- next_day$Actual - next_day$Prediction
+# the realised errors end on the last day of data, and the cached forecasts are for the day after
+stopifnot(max(test$Date) == end_date, all(next_prediction$Date == end_date + 1L))
+
+# Naive benchmark: the last observed price (2026-08-31)
+next_day <- rbind(data.frame(Date = end_date + 1L, Model = "Naive", Prediction = yesterday(end_date + 1L)),
+                  next_prediction[c("Date", "Model", "Prediction")])
+
+# Interval radius: same rule as in the intervals chunk, with every validation and test error now realised
+next_radius <- function(kind, alpha) {
+  calibration <- tail(abs(c(val[[kind]] - val$Actual, test[[kind]] - test$Actual)), 180L)
+  stopifnot(length(calibration) >= 100L)
+  rank <- min(length(calibration), ceiling((length(calibration) + 1L) * (1 - alpha)))
+  sort(calibration)[rank]
+}
+radius_80 <- vapply(next_day$Model, next_radius, numeric(1), alpha = 0.20, USE.NAMES = FALSE)
+radius_95 <- vapply(next_day$Model, next_radius, numeric(1), alpha = 0.05, USE.NAMES = FALSE)
+next_day$Lower80 <- next_day$Prediction - radius_80
+next_day$Upper80 <- next_day$Prediction + radius_80
+next_day$Lower95 <- next_day$Prediction - radius_95
+next_day$Upper95 <- next_day$Prediction + radius_95
 next_day <- next_day[order(-next_day$Prediction), ]
-kable(next_day, digits = 2, row.names = FALSE, caption = "Table 15. One-day-ahead forecasts for 2026-09-01 (SGD/MWh)")
+kable(next_day, digits = 2, row.names = FALSE,
+      caption = "Table 15. One-day-ahead forecasts for 2026-09-01 with 80% and 95% empirical intervals (SGD/MWh)")
 ```
 
 # Export
@@ -1180,6 +1224,16 @@ kable(temperature_cv[temperature_cv$Lambda == temperature_lambda[temperature_cv$
       row.names = FALSE, caption = "Table B1. Station reconstruction error at the chosen lambda")
 ```
 
+# Session information
+
+R and package versions of this knit. With `run_models = TRUE`, the TensorFlow and Keras versions behind `keras3` are printed as well.
+
 ```{r session-info}
 sessionInfo()
+# Python-side versions used by keras3 (sessionInfo() lists R packages only); printed in a full run only
+if (run_models) {
+  python_version <- function(module) tryCatch(as.character(reticulate::import(module)$`__version__`),
+                                              error = function(e) NA_character_)
+  c(tensorflow = python_version("tensorflow"), keras = python_version("keras"))
+}
 ```
