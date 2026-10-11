@@ -595,6 +595,13 @@ lstm_grid <- expand.grid(sequence = c(7L, 14L, 28L), units = c(16L, 32L), dropou
 lstm_grid <- lstm_grid[sample(nrow(lstm_grid), 12L), ]
 lstm_candidates <- lapply(seq_len(nrow(lstm_grid)), function(i) as.list(lstm_grid[i, ]))
 
+# Preserve the sampled rows and their order; LSTM continues the same RNG stream.
+candidate_table <- bind_rows(
+  data.frame(Model = "XGBoost", Draw = seq_len(nrow(xgb_grid)), Seed = 2026L,
+             GridSize = 96L, xgb_grid, row.names = NULL),
+  data.frame(Model = "LSTM", Draw = seq_len(nrow(lstm_grid)), Seed = 2026L,
+             GridSize = 24L, lstm_grid, row.names = NULL))
+
 get_candidates <- function(kind, step = 4L, tpc = FALSE, ancillary = "original") {
   if (kind == "ETS") return(ets_candidates())
   if (kind %in% c("SARIMA", "DynamicRegression")) return(arima_candidates(kind, step, tpc, ancillary))
@@ -926,6 +933,48 @@ kable(as_table(p_holm), digits = 3, caption = "Holm-adjusted p-values for Tables
 # Table 11: price-history models against regressions with external variables
 dm11 <- dm_table(list(c("SARIMA", "TSLM"), c("SARIMA", "DynamicRegression"), c("ETS", "TSLM"), c("ETS", "DynamicRegression")))
 kable(as_table(dm11), digits = 3, caption = "Table 11. DM tests: price history only vs external regressors")
+```
+
+```{r dm-hac}
+# Test-period sensitivity check for every comparison in Tables 9-11.
+# d_t = loss(first model) - loss(second model); negative means first is better.
+# Newey-West long-run variance: gamma(0) + 2 * sum((1-k/(L+1))*gamma(k)),
+# with centered autocovariances divided by n, Bartlett kernel and L = 7.
+# The HAC statistic is mean(d)/sqrt(long_run_variance/n), without an extra
+# Harvey-Leybourne-Newbold multiplier; p-values use t(n-1), without Holm adjustment.
+hac_comparison <- function(comparison, table_number, power) {
+  pair <- strsplit(comparison, " vs ", fixed = TRUE)[[1]]
+  loss_diff <- abs(test$Actual - test[[pair[1]]])^power -
+               abs(test$Actual - test[[pair[2]]])^power
+  stopifnot(all(is.finite(loss_diff)))
+  n <- length(loss_diff)
+  bandwidth <- 7L
+  centered <- loss_diff - mean(loss_diff)
+  gamma <- vapply(0:bandwidth, function(k)
+    sum(centered[seq_len(n-k)] * centered[seq.int(k+1L, n)]) / n, numeric(1))
+  long_run_variance <- gamma[1] +
+    2 * sum((1 - seq_len(bandwidth)/(bandwidth+1)) * gamma[-1])
+  stopifnot(n > 14L, long_run_variance > 0)
+  statistic <- mean(loss_diff) / sqrt(long_run_variance/n)
+  p_value <- 2 * pt(-abs(statistic), df = n-1L)
+  original <- dm(test, pair[1], pair[2], power)
+  data.frame(Table = table_number, Comparison = comparison,
+             Loss = if (power == 2L) "Squared" else "Absolute", N = n,
+             LB_Lag = 14L, LB_p = unname(Box.test(loss_diff, lag = 14L,
+                                                 type = "Ljung-Box", fitdf = 0L)$p.value),
+             Bandwidth = bandwidth, MeanLossDifference = mean(loss_diff),
+             LongRunVariance = long_run_variance, Original_DM = unname(original["DM"]),
+             Original_p = unname(original["p"]), HAC_DM = statistic, HAC_p = p_value,
+             OriginalSignificant5pct = original["p"] < 0.05,
+             HACSignificant5pct = p_value < 0.05, row.names = NULL)
+}
+dm_hac <- bind_rows(lapply(c(9L, 10L, 11L), function(table_number) {
+  comparisons <- rownames(get(paste0("dm", table_number)))
+  bind_rows(lapply(comparisons, function(comparison)
+    bind_rows(lapply(c(2L, 1L), function(power)
+      hac_comparison(comparison, table_number, power)))))
+}))
+kable(dm_hac, digits = 4, caption = "Test-period DM sensitivity to loss-difference autocorrelation")
 ```
 
 ## Do external variables help? (M0–M4)
@@ -1468,6 +1517,7 @@ write_xlsx(list(Daily = usep_sample, Train_Features = initial_data, Test_Feature
 write_xlsx(list(Descriptive = annual, Stationarity = stationarity, Frozen_Settings = frozen_table,
                 Accuracy = accuracy_table, Residuals_InSample = insample_tests, Residuals_Errors = error_diagnostics,
                 DM_vs_Naive = as_table(dm9), DM_Top3 = as_table(dm10), DM_Holm = as_table(p_holm),
+                DM_HAC = dm_hac, Candidates = candidate_table,
                 Regime = regime, Bias_Top3 = bias_table, Concentration = concentration,
                 DM_External = as_table(dm11), Incremental = incremental_scores,
                 Ancillary_Check = ancillary_check,
