@@ -1,0 +1,22 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "R: check project",
+      "type": "shell",
+      "command": "Rscript",
+      "args": ["run_pipeline.R", "--check"],
+      "options": {"cwd": "${workspaceFolder}"},
+      "problemMatcher": []
+    },
+    {
+      "label": "R: run pipeline",
+      "type": "shell",
+      "command": "Rscript",
+      "args": ["run_pipeline.R", "--run"],
+      "options": {"cwd": "${workspaceFolder}"},
+      "problemMatcher": []
+    }
+  ]
+}
+

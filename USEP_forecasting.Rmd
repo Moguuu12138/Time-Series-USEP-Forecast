@@ -19,8 +19,8 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
 
 **How to run.** The eight raw Excel files are in `data/` and are never modified. All exported tables and figures go to `output/`.
 
-- `run_models: false` (default): sections 1, 2 and 5–8 run in a few minutes. The model forecasts of the full run (sections 3–4) are loaded from `output/model_runs.rds` and `output/model_forecasts.xlsx`.
-- `run_models: true`: re-tunes and re-runs every model (several hours; needs `xgboost` and `keras3` with a TensorFlow backend) and overwrites those two files.
+- `run_models: false` (default): sections 1, 2 and 5–8 run in a few minutes. The model forecasts of the full run (sections 3–4) are loaded from `output/model_runs.rds` and `output/model_forecasts.xlsx`; the ancillary-price robustness forecasts from `output/ancillary_robustness.rds`.
+- `run_models: true`: re-tunes and re-runs every model (several hours; needs `xgboost` and `keras3` with a TensorFlow backend) and overwrites those three files.
 
 The saved full run used R 4.6.1, TensorFlow 2.21.0 and Keras 3.15.1.
 

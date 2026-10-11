@@ -1,0 +1,16 @@
+.DS_Store
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+
+# regenerated on every knit
+USEP_forecasting.html
+USEP_forecasting_files/
+*_cache/
+output/figures/
+output/processed_data.xlsx
+output/report_tables.xlsx
+
+# Office lock files
+~$*
