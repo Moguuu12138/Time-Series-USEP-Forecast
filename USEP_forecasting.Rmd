@@ -811,7 +811,7 @@ kable(accuracy_table, digits = 3, row.names = FALSE,
       caption = "Table 7. Validation RMSE and test-period accuracy (RMSE, MAE, MASE, sMAPE are test values), sorted by test RMSE")
 ```
 
-```{r fig3, fig.height = 7.5}
+```{r fig3, fig.height = 5.5}
 model_colours <- c(Naive = "#7F7F7F", SARIMA = "#F8766D", ETS = "#7CAE00", TSLM = "#E76BF3",
                    DynamicRegression = "#619CFF", XGBoost = "#00BFC4", LSTM = "#C77CFF")
 # The four best models by test RMSE, benchmarks excluded
@@ -823,10 +823,11 @@ p3 <- test |>
   ggplot(aes(x = Date)) +
   geom_line(aes(y = Actual, colour = "Actual")) +
   geom_line(aes(y = Forecast, colour = Model)) +
-  facet_grid(vars(Model)) +
+  facet_wrap(vars(Model), ncol = 2) +
   scale_colour_manual(values = c(Actual = "black", model_colours[top4]), breaks = c("Actual", top4)) +
+  theme(legend.position = "bottom") +
   labs(title = "Test-period forecasts of the four best models", y = "USEP (SGD/MWh)", colour = "series")
-save_fig(p3, "fig3_top4.png", 8, 7.5)
+save_fig(p3, "fig3_top4.png", 8, 5.5)
 ```
 
 ```{r fig4, fig.height = 3}
