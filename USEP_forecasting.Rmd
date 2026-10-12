@@ -797,7 +797,8 @@ rmse <- function(df, m) sqrt(mean((df$Actual - df[[m]])^2))
 
 ```{r accuracy}
 accuracy_table <- bind_rows(lapply(eval_models, function(m)
-  cbind(Model = m, Val_RMSE = rmse(val, m), score(test$Actual, test[[m]]))))
+  cbind(Model = m, Val_RMSE = rmse(val, m), Val_MAE = mean(abs(val$Actual - val[[m]])),
+        score(test$Actual, test[[m]]))))
 base_mae  <- function(m) accuracy_table$MAE[accuracy_table$Model == m]
 base_rmse <- function(m) accuracy_table$RMSE[accuracy_table$Model == m]
 accuracy_table <- accuracy_table |>
@@ -980,9 +981,12 @@ kable(dm_hac, digits = 4, caption = "Test-period DM sensitivity to loss-differen
 ## Do external variables help? (M0–M4)
 
 ```{r incremental}
-incremental_scores <- bind_rows(lapply(names(incremental), function(key)
+incremental_scores <- bind_rows(lapply(names(incremental), function(key) {
+  v <- incremental[[key]]$prediction  # 该步的验证期预测，存在 model_runs.rds 里
   cbind(Model = sub("_M[0-4]$", "", key), Step = incremental[[key]]$step,
-        score(incremental_prediction$Actual, incremental_prediction[[key]])))) |>
+        Val_RMSE = sqrt(mean((val$Actual - v)^2)), Val_MAE = mean(abs(val$Actual - v)),
+        score(incremental_prediction$Actual, incremental_prediction[[key]]))
+})) |>
   group_by(Model) |>
   arrange(Step, .by_group = TRUE) |>
   mutate(MarginalRMSEImprovement = 1 - RMSE / lag(RMSE), CumulativeRMSEImprovement = 1 - RMSE / first(RMSE)) |>
